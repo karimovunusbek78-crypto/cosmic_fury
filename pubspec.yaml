@@ -37,6 +37,7 @@ dependencies:
   flame: ^1.38.0
   responsive_sizer: ^3.3.1
   flame_audio: ^2.12.2
+  appodeal_flutter: ^1.1.2
 
 dev_dependencies:
   flutter_test:

@@ -2,7 +2,9 @@ import 'dart:math';
 
 import 'package:cosmic_fury/src/pages/main/level_pages/ship_super_powers.dart';
 import 'package:cosmic_fury/src/pages/main/pages/mode_select_page.dart';
+import 'package:cosmic_fury/src/pages/shop/shop_page.dart';
 import 'package:cosmic_fury/src/pages/skins/skins_page.dart';
+import 'package:cosmic_fury/src/pages/upgrade/upgrade_page.dart';
 import 'package:flutter/material.dart';
 import 'package:flame/game.dart';
 import 'package:flame/components.dart';
@@ -25,6 +27,32 @@ import 'package:flame_audio/flame_audio.dart'; // <-- background music + click S
 // and Ship both hold an optional reference to one, supplied by the
 // level (the main-menu preview ship never gets one, same pattern as
 // EnergySystem below).
+
+/// ------------------------------------------------------------
+/// RENDER ORDER — every visual layer in this game is given an
+/// explicit, fixed `priority` (higher = drawn on top). This matters
+/// because several layers are added to the game asynchronously
+/// (background parallax load, ship sprite load) and Flame's default
+/// behavior for equal-priority components is "whoever gets added
+/// first renders first (i.e. underneath)". Without explicit
+/// priorities, the background and the ship were racing each other:
+/// most of the time the ship's single sprite loaded faster than the
+/// parallax background and ended up on top like normal, but
+/// sometimes the background finished loading/adding AFTER the ship
+/// and painted right over it — while bullets (always added well
+/// after both, once you actually start shooting) kept rendering
+/// fine. That's exactly the "ship invisible, bullets still show up"
+/// bug. Fixed priorities make draw order deterministic no matter
+/// which async load wins the race.
+/// ------------------------------------------------------------
+class RenderPriority {
+  static const int background = -100;
+  static const int starField = -50;
+  static const int engineFlame = 5;
+  static const int laserBeam = 8;
+  static const int ship = 10;
+  static const int bullet = 20;
+}
 
 /// ------------------------------------------------------------
 /// ENERGY SYSTEM — governs how much the player can shoot before
@@ -426,6 +454,14 @@ class MyFlameGame extends FlameGame {
     // after this onLoad resolves, in _LevelFlameGame) starts as
     // soon as the slowest of the three finishes instead of the sum
     // of all three.
+    //
+    // IMPORTANT: because these run concurrently, the ORDER in which
+    // they finish and get add()-ed is not guaranteed. Every layer
+    // below is therefore given an explicit `priority` (see
+    // RenderPriority) so draw order stays correct regardless of
+    // which async task wins the race — this is what previously
+    // caused the ship to sometimes render underneath (i.e.
+    // invisible behind) the background.
     // -------------------------------------------------------------
 
     // click.mp3 is always needed (button SFX everywhere). main.mp3
@@ -448,21 +484,28 @@ class MyFlameGame extends FlameGame {
     // IMAGE CONTENT shifts. Negative y here makes it read as
     // scrolling downward on screen (confirmed fix from previous
     // build where it looked like it scrolled up).
+    //
+    // Explicit low priority so this always renders BEHIND every
+    // other layer no matter when its (async) load finishes.
     // -------------------------------------------------------------
     final parallaxFuture = loadParallaxComponent(
       [ParallaxImageData('background.png')],
       baseVelocity: Vector2(0, -40), // negative = scrolls down on screen
       repeat: ImageRepeat.repeat,
       fill: LayerFill.width,
-    ).then(add);
+    ).then((bg) {
+      bg.priority = RenderPriority.background;
+      add(bg);
+    });
 
     // -------------------------------------------------------------
     // Tiny moving "stars" layered on top of the background — small
     // white dots that drift and add depth/parallax motion, like
     // debris/stars streaking past as you travel through space.
-    // Cheap/sync — no need to wait on anything for this one.
+    // Cheap/sync — no need to wait on anything for this one. Sits
+    // just above the background, still well below the ship.
     // -------------------------------------------------------------
-    add(StarField());
+    add(StarField()..priority = RenderPriority.starField);
 
     // -------------------------------------------------------------
     // Player ship — loads whichever skin is currently equipped.
@@ -473,8 +516,8 @@ class MyFlameGame extends FlameGame {
 
     // Listen for skin changes made on the Skins page WHILE this game
     // is already running (e.g. you pop back to an existing
-    // MainGamePage instead of it being rebuilt from scratch) and
-    // swap the ship live the instant SELECT is tapped, instead of
+    // MainGamePage instance instead of it being rebuilt from scratch)
+    // and swap the ship live the instant SELECT is tapped, instead of
     // only picking up the new skin next time onLoad() happens to run.
     equippedSkinNotifier.addListener(_onEquippedSkinChanged);
   }
@@ -498,7 +541,8 @@ class MyFlameGame extends FlameGame {
       energySystem: energySystem,
       superPowerController: superPowerController,
     )
-      ..setHome(Vector2(size.x / 2, size.y / 2 + 120)); // a bit lower than center
+      ..setHome(Vector2(size.x / 2, size.y / 2 + 120)) // a bit lower than center
+      ..priority = RenderPriority.ship;
     add(ship);
 
     // Engine flame is a SIBLING of the ship (not a child) that tracks
@@ -506,7 +550,9 @@ class MyFlameGame extends FlameGame {
     // the same coordinate space bullets already use, which is why the
     // bullets land correctly and a child-based flame wouldn't. Reads
     // its color/spread/offset straight from the equipped skin so it
-    // matches whatever you saw in the skin preview.
+    // matches whatever you saw in the skin preview. Priority keeps it
+    // just behind the ship sprite so it reads as coming out of the
+    // tail rather than floating on top of the hull.
     _engineFlame = EngineFlame(
       ship: ship,
       accentColor: skin.flameAccent,
@@ -514,7 +560,7 @@ class MyFlameGame extends FlameGame {
       spread: skin.flameSpread * flameScale,
       particleRadius: skin.flameParticleRadius * flameScale,
       length: skin.flameLength * flameScale,
-    );
+    )..priority = RenderPriority.engineFlame;
     add(_engineFlame);
 
     // Skins with bulletBeam (e.g. Frostbyte) don't fire discrete
@@ -541,7 +587,7 @@ class MyFlameGame extends FlameGame {
         offsetYFraction: skin.bulletOffsetYFraction,
         damageGetter: () => effectiveStatValue(skin, 2).toDouble(), // 2 = Damage
         energySystem: energySystem,
-      );
+      )..priority = RenderPriority.laserBeam;
       add(_laserBeam!);
     }
   }
@@ -1129,6 +1175,10 @@ class LaserBeam extends Component with HasGameRef<MyFlameGame> {
 /// Absolute Zero super power is active (see
 /// SuperPowerController.playerBulletSpeedMultiplier), so the player's
 /// own shots crawl out slowly right alongside the slowed enemies.
+///
+/// Fixed `priority: RenderPriority.bullet` (see the `super(...)` call
+/// below) so bullets always render above the ship/background/flame
+/// regardless of add order.
 class Bullet extends PositionComponent with HasGameRef<MyFlameGame> {
   /// Base travel speed before any super-power multiplier is applied.
   static const double baseSpeed = 460;
@@ -1161,6 +1211,7 @@ class Bullet extends PositionComponent with HasGameRef<MyFlameGame> {
           position: startPosition,
           size: Vector2(bulletWidth, bulletHeight),
           anchor: Anchor.center,
+          priority: RenderPriority.bullet,
         );
 
   @override
@@ -1286,6 +1337,9 @@ class Bullet extends PositionComponent with HasGameRef<MyFlameGame> {
 /// it touches (including new enemies further along its path) still
 /// takes damage normally. It only disappears once its lifetime runs
 /// out or it leaves the screen — never on "first hit".
+///
+/// Fixed `priority: RenderPriority.bullet` (same as [Bullet]) so it
+/// always renders above the ship/background regardless of add order.
 class HomingBullet extends PositionComponent with HasGameRef<MyFlameGame> {
   final Color color;
   final double damage;
@@ -1326,6 +1380,7 @@ class HomingBullet extends PositionComponent with HasGameRef<MyFlameGame> {
           position: startPosition,
           size: Vector2(width, height),
           anchor: Anchor.center,
+          priority: RenderPriority.bullet,
         );
 
   /// Hit box used for piercing damage detection — see class doc
@@ -1670,8 +1725,11 @@ class _MainGamePageState extends State<MainGamePage> {
 
                 // ---------------------------------------------------------
                 // Play / Shop / Upgrade — main action row near the bottom,
-                // just under where the ship patrols. Play now navigates
-                // to ModeSelectPage after the click SFX fires.
+                // just under where the ship patrols. Play navigates to
+                // ModeSelectPage, Shop navigates to the new ShopPage, and
+                // Upgrade navigates to UpgradePage pre-selected on
+                // whichever ship is currently equipped — all after the
+                // click SFX fires.
                 // ---------------------------------------------------------
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 0, 16, 20),
@@ -1683,6 +1741,9 @@ class _MainGamePageState extends State<MainGamePage> {
                           label: 'Shop',
                           onTap: () {
                             _playClickSound();
+                            Navigator.of(context).push(
+                              MaterialPageRoute(builder: (_) => const ShopPage()),
+                            );
                           },
                         ),
                       ),
@@ -1703,6 +1764,12 @@ class _MainGamePageState extends State<MainGamePage> {
                           label: 'Upgrade',
                           onTap: () {
                             _playClickSound();
+                            Navigator.of(context).push(
+                              MaterialPageRoute(
+                                builder: (_) =>
+                                    UpgradePage(initialSkin: equippedSkin),
+                              ),
+                            );
                           },
                         ),
                       ),
